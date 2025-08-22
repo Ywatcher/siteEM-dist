@@ -47,13 +47,6 @@ def e_step(sequence: List[int],
     # windows are [0, 1], [1, 2], [2, 3]. Your code will call site_posterior on 
     # each of these windows and store the result in posteriors_row.
     # remember that python is 0 indexed and exclusive of the end index
-    # <snip>
-    for posterior_index, _ in enumerate(posteriors_row):
-        subseq = sequence[posterior_index:
-                          posterior_index+sequence_model.motif_length()]
-        posteriors_row[posterior_index] = site_posterior(subseq,
-                                                          sequence_model)
-    # </snip>
     # return the normalized posteriors per Bailey and elkan 1993
     return normalize_posterior_row(posteriors_row,
                                    sequence_model.motif_length()) \
@@ -79,12 +72,6 @@ def update_motif_prior(posteriors: List[NDArray[np.float64]]) -> float:
     # Calculate the expected total motif count, summed over all sequences. 
     # This is the sum of the posteriors. Then normalize by the maximum possible
     # motif count to get the udpated prior.
-    # <snip>
-    expected_motif_count = sum([sum(row) for row in posteriors])
-    max_motif_count = sum([len(row) for row in posteriors])
-
-    return expected_motif_count / max_motif_count
-    # </snip>
 
 def update_site_probs(sequences:  List[List[int]],
                       motif_length: int,
@@ -128,26 +115,6 @@ def update_site_probs(sequences:  List[List[int]],
     # of the posteriors -- you'll need to index into the erasers list to get the
     # correct eraser for the current position in the motif. You will need 3 nested
     # loops to do this.
-    # <snip>
-    # the outer loop iterates over the sequences
-    for i, seq in enumerate(sequences):
-        # extract the posterior vector for the current sequence. The values in
-        # each entry in posterior corresponds to the posterior probability of
-        # a window of length motif_length being bound
-        posteriors_row = posteriors[i]
-        # the second level loop iterates over windows of length motif_length
-        # in the current sequence
-        for j in range(len(seq) - motif_length + 1):
-            # extract the subsequence of length motif_length from the current
-            # sequence
-            subseq = seq[j:j+motif_length]
-            # the inner loop indexes the bases in the subsequence and
-            # positions in the motif.
-            for k, base in enumerate(subseq):
-                unnormalized_site_probs[k][base] += \
-                    (posteriors_row[j] * erasers[i][j + k])
-
-    # </snip>
     # calculate the sum of each position in the pfm
     normalizer = np.sum(unnormalized_site_probs, axis=1)[:, np.newaxis]
 
@@ -186,15 +153,6 @@ def m_step(sequences: List[List[int]],
     :rtype: tuple[list[float], list[list[float]]]
     """
     # Update the motif prior and site probabilities based on the posteriors.
-    # <snip>
-    updated_site_prior = update_motif_prior(posteriors)
-
-    updated_site_probs = update_site_probs(sequences,
-                                           motif_length,
-                                           posteriors,
-                                           motif_pseudocounts,
-                                           erasers)
-    # </snip>
     return updated_site_prior, updated_site_probs
 
 
@@ -249,19 +207,7 @@ def siteEM(sequences: List[List[int]],
             # E-step
             # Note: the E-step is run on each sequence in the input list of
             # sequences
-            # <snip>
-            normalized_posteriors = [
-                e_step(seq, current_sequence_model) for seq in sequences]
-            # </snip>
             # M-step. The M-step requires the entire list of sequences.
-            # <snip>
-            updated_site_prior, updated_site_probs = \
-                m_step(sequences,
-                       len(current_sequence_model),
-                       normalized_posteriors,
-                       motif_pseudocounts,
-                       erasers=erasers)
-            # </snip>
 
             # set the prev_sequence_model to a copy of the parameters which
             # where used in this iteration

@@ -1,18 +1,9 @@
 {
-	"name": "MRB Claude DevContainer",
+	"name": "Comp Bio Student DevContainer",
 	"image": "ghcr.io/michael-brent/compbio-base:latest",
 
-	// Comment "mounts" statement below if the source path is wrong or unavailable
-	"mounts": [
-		{
-			"source": "/Users/brent/D/Teaching/Bio5495/private/python-labs/general/cse587Autils",
-			"target": "/workspaces/cse587Autils",
-			"type": "bind"
-		}
-	],
-
 	// 👇 Use 'postCreateCommand' to run commands after the container is created.
-	"postStartCommand": "cd ${containerWorkspaceFolder} && poetry config virtualenvs.in-project true && poetry install",
+	"postCreateCommand": "cd ${containerWorkspaceFolder} && poetry config virtualenvs.in-project true && poetry install",
 
 	// 👇 Configure tool-specific properties.
 	"customizations": {
@@ -20,21 +11,9 @@
             "extensions":["ms-python.python", 
 						  "njpwerner.autodocstring", 
 						  "ms-toolsai.jupyter",
-						  "ms-python.mypy-type-checker",
-						  "anthropic.claude-code"],
+						  "ms-python.mypy-type-checker"],
 			"settings": {"python.pythonPath": "${workspaceFolder}/.venv/bin/python"}
             }
-		},
- 
-		"portsAttributes": {
-    		"*": { "onAutoForward": "ignore" }
-  			},
-
-		// 👇 Features to add to the Dev Container. More info: https://containers.dev/implementors/features.
-		// "features": {},
-
-		"features": {
-			"ghcr.io/devcontainers/features/node:1": {}
 		}
 
 }
