@@ -1,0 +1,26 @@
+[tool.poetry]
+version = "1.0.0"
+description = ""
+authors = ["michael brent <mbrent@wustl.edu>", "chase mateusiak <chase.mateusiak@gmail.com>"]
+license = "LICENSE"
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.9"
+biopython = "^1.81"
+numpy = "^1.25.2"
+# To use the github vesion of utils, comment the line below and uncomment the 
+# one below that. To use local copy of utils reverse. Then run "poetry lock".
+# cse587autils = { path = "/workspaces/cse587Autils", develop = true }
+cse587autils = { git = "https://github.com/CSE587A-permanent-org/cse587Autils.git" }
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.25.0"
+autopep8 = "^2.0.2"
+flake8 = "^6.1.0"
+gradescope-utils = "^0.5.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
