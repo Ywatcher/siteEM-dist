@@ -7,12 +7,89 @@ from pathlib import PosixPath
 from cse587Autils.SequenceObjects.SequenceModel import SequenceModel
 import numpy as np
 from numpy.typing import NDArray
+from numpy.lib.stride_tricks import sliding_window_view
 from .utils.bailey_elkan_hacks import \
     normalize_posterior_row, update_eraser_row
 from .utils.read_in_fasta import read_in_fasta
 from .utils.nucleotide_count import nucleotide_count
 
+def seq2onehot(sequence:List[int],num_classes:int) -> NDArray:
+    seq_len = len(sequence)
+    onehot = np.eye(num_classes)[sequence]
+    return onehot
+
+def batch_seq2onehot(sequences: List[List[int]],num_classes:int) -> NDArray:
+    sequence_onehot = np.concatenate([
+        # [N,L] -> [N,L,b]
+        # N: # of seq 
+        # L: len of seq 
+        # b: # of bases i.e. 4
+        np.expand_dims(seq2onehot(seq, num_classes=4),0) 
+        for seq in sequences
+        ], axis=0)
+    return sequence_onehot
+
+def onehot_seq2windows(onehot_seq:NDArray, window_size:int, batch=False) -> NDArray:
+    # onehot_seq: [L, b] where b =4
+    if batch:
+        raise NotImplementedError
+    return sliding_window_view(onehot_seq, (window_size, onehot_seq.shape[1]))[:,0]
+
+
+class LikelihoodSequenceModel(SequenceModel):
+    def sample_motif(self):
+        vectorized_choice = np.vectorize(
+            # 4 base 
+            pyfunc=lambda prob_base_i: np.random.choice(4, size=1, p=prob_base_i),
+            signature="(m) -> ()"
+        )
+        return vectorized_choice(self.site_base_probs)
+
+    def sample_background(self):
+        # print("size",self.motif_length, "p",self.background_base_probs)
+        return np.random.choice(
+            4, # # mapping: 0 = A, 1 = C, 2 = G, 3 = T
+            size= self.motif_length(),
+            replace=True, 
+            p=self.background_base_probs 
+        )
+
+    def likelihood_motif(self, sequence_onehot, batched=False):
+        # sequence_onehot: [seq_len, 4]
+        # base_prob: [seq_len, 4]
+        # likelihood: prod_i sum_k(p_base_ik * delta_ik)
+        if batched:
+            return np.prod(np.einsum(
+                "nlb, lb->nl",
+                sequence_onehot, self.site_base_probs
+            ), axis=1)
+        else:
+            return np.prod(np.einsum(
+                "lb, lb->l",
+                sequence_onehot, self.site_base_probs
+            ))
+
+    def likelihood_background(self, sequence_onehot, batched=False):
+        # sequence_onehot: [seq_len, 4]
+        # base_prob: [4 ]
+        if batched:
+            return np.prod(np.einsum(
+                "nlb, b->nl",
+                sequence_onehot, self.background_base_probs
+            ), axis=1)
+        else:
+            return np.prod(np.einsum(
+                "lb, b->l",
+                sequence_onehot, self.background_base_probs
+            ))
+
+    @classmethod
+    def from_super(cls, obj:SequenceModel) -> "LikelihoodSequenceModel":
+        return LikelihoodSequenceModel(
+                obj.site_prior, obj.site_base_probs,obj.background_base_probs,precision,tolerance)
+
 logger = logging.getLogger(__name__)
+
 
 # e_step takes a single input sequence, not the list of all input sequences.
 def e_step(sequence: List[int],
@@ -34,14 +111,23 @@ def e_step(sequence: List[int],
         sequence normalized per Bailey and elkan 1993
     :raises ValueError: If len(sequence) is less than len(sequence_model)
     """
-    if not len(sequence) >= len(sequence_model):
+    if isinstance(sequence, list): # convert sequence to onehot np array [L, b]
+        sequence_onehot = seq2onehot(sequence, 4)
+    if not isinstance(sequence_model):
+        sequence_model = LikelihoodSequenceModel.from_super(sequence_model)
+    if not sequence_onehot.shape[0] >= len(sequence_model):
         raise ValueError("sequence must be longer than site_base_probs")
     if not isinstance(sequence_model, SequenceModel):
         raise TypeError("sequence_model must be a SequenceModel object")
     
     # posteriors_row is the NDArray of posteriors for a single input sequence.
-    posteriors_row = np.zeros(len(sequence) - sequence_model.motif_length() + 1)
-
+    # sequence_onehot: [L,b]
+    # convert to slide window [L-W+1, W, b]
+    sequence_windows_onehot = onehot_seq2windows(sequence_onehot, len(sequence_model)) 
+    posteriors_row =  site_posterior(
+        batched_sequence_window_onehot=sequence_windows_onehot,
+        sequence_model=sequence_model
+    )
     # iterate a sliding window of length motif_length over the sequence
     # eg. for motif length 2 and sequence [0, 1, 2, 3], the
     # windows are [0, 1], [1, 2], [2, 3]. Your code will call site_posterior on 
@@ -194,9 +280,11 @@ def siteEM(sequences: List[List[int]],
         set of sequence model parameters.
     :rtype: List[Tuple[List[List[float]], SequenceModel]]
     """
-
+    
     # initialize the erasers
     erasers = [np.ones(len(seq)) for seq in sequences]
+    if not isinstance(init_sequence_model, LikelihoodSequenceModel):
+        init_sequence_model = LikelihoodSequenceModel.from_super(init_sequence_model)
     
     # Perform EM iterations
     for index in range(num_motifs_to_find):
@@ -215,7 +303,7 @@ def siteEM(sequences: List[List[int]],
             prev_sequence_model = current_sequence_model
             # store the updated parameters in a SequenceModel object.
             # the background probs do not change between iterations
-            current_sequence_model = SequenceModel(
+            current_sequence_model = LikelihoodSequenceModel(
                 updated_site_prior,
                 updated_site_probs,
                 init_sequence_model.background_base_probs)
@@ -330,21 +418,40 @@ def siteEM_intializer(fasta: Tuple[str, PosixPath],
                   accuracy=kwargs.get('accuracy', 1e-6),
                   num_motifs_to_find=kwargs.get('num_motifs_to_find', 1))
 
-def site_posterior (O00OO00O0OO0OO00O :list [int ],OO00O0000OOO0O000 :SequenceModel )->float :#line:2
-    ""#line:25
-    if not isinstance (O00OO00O0OO0OO00O ,list ):#line:27
-        raise TypeError ("sequence must be a list")#line:28
-    if not len (O00OO00O0OO0OO00O )==OO00O0000OOO0O000 .motif_length ():#line:29
-        raise ValueError ("sequence and site_base_probs must be the same length")#line:31
-    for O0OOOOOOO0O000OOO in O00OO00O0OO0OO00O :#line:32
-        if not isinstance (O0OOOOOOO0O000OOO ,int ):#line:33
-            raise TypeError ("sequence must be a list of integers")#line:34
-        if O0OOOOOOO0O000OOO <0 or O0OOOOOOO0O000OOO >3 :#line:35
-            raise ValueError ("sequence must be a list of integers between 0 " "and 3 (inclusive)")#line:37
-    O0O00OO0O00O0O00O =OO00O0000OOO0O000 .site_prior #line:41
-    O0O0O0O0O0OOOO00O =OO00O0000OOO0O000 .background_prior #line:42
-    for OO000000O00OO0OO0 ,O0O0OO0OOOOO0OO00 in enumerate (OO00O0000OOO0O000 .site_base_probs ):#line:45
-        O0O00OO0O00O0O00O *=O0O0OO0OOOOO0OO00 [O00OO00O0OO0OO00O [OO000000O00OO0OO0 ]]#line:46
-        O0O0O0O0O0OOOO00O *=OO00O0000OOO0O000 .background_base_probs [O00OO00O0OO0OO00O [OO000000O00OO0OO0 ]]#line:48
-    O0O0OOO00OOOO0OOO =(O0O00OO0O00O0O00O /(O0O00OO0O00O0O00O +O0O0O0O0O0OOOO00O ))#line:54
-    return O0O0OOO00OOOO0OOO 
+
+
+def site_posterior(
+        batched_sequence_window_onehot: NDArray,
+        sequence_model: LikelihoodSequenceModel) -> NDArray:
+    """
+    Calculate the posterior probability of a bound site versus an unbound site.
+
+    :param batched_sequence_window_onehot [N,W,b]  
+    :return: Posterior probability of a bound site [N]
+    """
+    # check that the inputs are valid
+    numerator_site = sequence_model.site_prior * sequence_model.likelihood_motif(sequence_onehot, batched=True)
+    numerator_bg = (1-sequence_model.site_prior) * sequence_model.likelihood_background(sequence_onehot, batched=True)
+    if numerator_site == 0 and numerator_bg == 0:
+        raise ZeroDivisionError("got likelihood be 0 for both site and background")
+    posterior_prob = numerator_site / (numerator_site + numerator_bg)
+    return posterior_prob
+
+# def site_posterior (O00OO00O0OO0OO00O :list [int ],OO00O0000OOO0O000 :SequenceModel )->float :#line:2
+    # ""#line:25
+    # if not isinstance (O00OO00O0OO0OO00O ,list ):#line:27
+        # raise TypeError ("sequence must be a list")#line:28
+    # if not len (O00OO00O0OO0OO00O )==OO00O0000OOO0O000 .motif_length ():#line:29
+        # raise ValueError ("sequence and site_base_probs must be the same length")#line:31
+    # for O0OOOOOOO0O000OOO in O00OO00O0OO0OO00O :#line:32
+        # if not isinstance (O0OOOOOOO0O000OOO ,int ):#line:33
+            # raise TypeError ("sequence must be a list of integers")#line:34
+        # if O0OOOOOOO0O000OOO <0 or O0OOOOOOO0O000OOO >3 :#line:35
+            # raise ValueError ("sequence must be a list of integers between 0 " "and 3 (inclusive)")#line:37
+    # O0O00OO0O00O0O00O =OO00O0000OOO0O000 .site_prior #line:41
+    # O0O0O0O0O0OOOO00O =OO00O0000OOO0O000 .background_prior #line:42
+    # for OO000000O00OO0OO0 ,O0O0OO0OOOOO0OO00 in enumerate (OO00O0000OOO0O000 .site_base_probs ):#line:45
+        # O0O00OO0O00O0O00O *=O0O0OO0OOOOO0OO00 [O00OO00O0OO0OO00O [OO000000O00OO0OO0 ]]#line:46
+        # O0O0O0O0O0OOOO00O *=OO00O0000OOO0O000 .background_base_probs [O00OO00O0OO0OO00O [OO000000O00OO0OO0 ]]#line:48
+    # O0O0OOO00OOOO0OOO =(O0O00OO0O00O0O00O /(O0O00OO0O00O0O00O +O0O0O0O0O0OOOO00O ))#line:54
+    # return O0O0OOO00OOOO0OOO 
