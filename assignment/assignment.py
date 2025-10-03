@@ -18,16 +18,23 @@ def seq2onehot(sequence:List[int],num_classes:int) -> NDArray:
     onehot = np.eye(num_classes)[sequence]
     return onehot
 
-def batch_seq2onehot(sequences: List[List[int]],num_classes:int) -> NDArray:
-    sequence_onehot = np.concatenate([
-        # [N,L] -> [N,L,b]
-        # N: # of seq 
-        # L: len of seq 
-        # b: # of bases i.e. 4
-        np.expand_dims(seq2onehot(seq, num_classes=4),0) 
-        for seq in sequences
-        ], axis=0)
-    return sequence_onehot
+def standardize_sequences(sequences):
+    if not isinstance(sequences[0], NDArray):
+        onehot_sequences = [seq2onehot(seq,4) for seq in sequences]
+    else:
+        onehot_sequences = sequences
+    return onehot_sequences
+
+# def batch_seq2onehot(sequences: List[List[int]],num_classes:int) -> LiNDArray:
+    # # sequence_onehot = np.concatenate([
+        # # # [N,L] -> [N,L,b]
+        # # # N: # of seq 
+        # # # L: len of seq 
+        # # # b: # of bases i.e. 4
+        # # np.expand_dims(seq2onehot(seq, num_classes=4),0) 
+        # # for seq in sequences
+    # # ], axis=0)
+    # return sequence_onehot
 
 def onehot_seq2windows(onehot_seq:NDArray, window_size:int, batch=False) -> NDArray:
     # onehot_seq: [L, b] where b =4
@@ -86,13 +93,14 @@ class LikelihoodSequenceModel(SequenceModel):
     @classmethod
     def from_super(cls, obj:SequenceModel) -> "LikelihoodSequenceModel":
         return LikelihoodSequenceModel(
-                obj.site_prior, obj.site_base_probs,obj.background_base_probs,precision,tolerance)
+                obj.site_prior, obj.site_base_probs, obj.background_base_probs,
+                obj.precision, obj.tolerance)
 
 logger = logging.getLogger(__name__)
 
 
 # e_step takes a single input sequence, not the list of all input sequences.
-def e_step(sequence: List[int],
+def e_step(sequence: Union[List[int], NDArray],
            sequence_model: SequenceModel,
            bailey_elkan_norm: bool = True) -> NDArray[np.float64]:
     """
@@ -113,7 +121,9 @@ def e_step(sequence: List[int],
     """
     if isinstance(sequence, list): # convert sequence to onehot np array [L, b]
         sequence_onehot = seq2onehot(sequence, 4)
-    if not isinstance(sequence_model):
+    else:
+        sequence_onehot = sequence  
+    if not isinstance(sequence_model, LikelihoodSequenceModel):
         sequence_model = LikelihoodSequenceModel.from_super(sequence_model)
     if not sequence_onehot.shape[0] >= len(sequence_model):
         raise ValueError("sequence must be longer than site_base_probs")
@@ -123,9 +133,9 @@ def e_step(sequence: List[int],
     # posteriors_row is the NDArray of posteriors for a single input sequence.
     # sequence_onehot: [L,b]
     # convert to slide window [L-W+1, W, b]
-    sequence_windows_onehot = onehot_seq2windows(sequence_onehot, len(sequence_model)) 
+    windows_onehot = onehot_seq2windows(sequence_onehot, len(sequence_model)) 
     posteriors_row =  site_posterior(
-        batched_sequence_window_onehot=sequence_windows_onehot,
+        batched_window_onehot=windows_onehot,
         sequence_model=sequence_model
     )
     # iterate a sliding window of length motif_length over the sequence
@@ -158,11 +168,15 @@ def update_motif_prior(posteriors: List[NDArray[np.float64]]) -> float:
     # Calculate the expected total motif count, summed over all sequences. 
     # This is the sum of the posteriors. Then normalize by the maximum possible
     # motif count to get the udpated prior.
+    posteriors_all_motif = np.concatenate(posteriors, axis=0)
+    motif_marginal = np.mean(posteriors_all_motif)
+    return motif_marginal
 
-def update_site_probs(sequences:  List[List[int]],
+
+def update_site_probs(sequences: Union[List[List[int]], List[NDArray]],
                       motif_length: int,
                       posteriors: List[NDArray[np.float64]],
-                      motif_pseudocounts: List[float],
+                      motif_pseudocounts: Union[List[float],NDArray],
                       erasers: List[NDArray[np.float64]],
                       normalize: bool = True) -> List[List[float]]:
     """
@@ -178,7 +192,7 @@ def update_site_probs(sequences:  List[List[int]],
     :type posteriors: list[NDArray[float]]
     :param motif_pseudocounts: A list of 4 floats representing the pseudocount
         for each base
-    :type motif_pseudocounts: lit[float]
+    :type motif_pseudocounts: list[float]
     :param erasers: A list of lists. Each sublist contains the eraser
         probabilities for a subsequence length motif_length within
         a given input sequence being bound. If False, do not use erasers.
@@ -191,9 +205,31 @@ def update_site_probs(sequences:  List[List[int]],
         observing each of the 4 bases at a given position in the motif
     :rtype: list[list[float]]
     """
+    # convert sequences to onehot 
+    onehot_sequences = standardize_sequences(sequences)
+    n_seq = onehot_sequences.shape[0]
+    assert n_seq == len(posteriors), """
+    number of sequences should equal to number of posteriors.
+    got {} and {}
+    """.format(n_seq, len(posteriors))
+    if isinstance(motif_pseudocounts, list):
+        motif_pseudocounts = np.array(motif_pseudocounts) # [4]
+    if erasers:
+        onehot_sequences = [
+            np.einsum(
+                "lb,b->lb", # set one hot indicator to 0 if position is erased
+                onehot_sequences[i_seq], erasers[i_seq]
+            ) for i_seq in range(n_seq)
+        ]
+    onehot_windows = [
+        onehot_seq2windows(seq, motif_length)
+        for seq in onehot_sequences
+    ]
     # instantiate a list of lists to hold the unnormalized site probs.
-    unnormalized_site_probs = [deepcopy(motif_pseudocounts)
-                               for _ in range(motif_length)]
+    # unnormalized_site_probs = [deepcopy(motif_pseudocounts)
+                               # for _ in range(motif_length)]
+    # site probs: [W,b]
+    # freqs: [W,b]
     # update the pfm by looping over sequences, windows within each sequence,
     # and positions within each window. When calculating the expected frequency
     # of a given letter in a given position of the motif, multiply posteriors by 
@@ -202,13 +238,22 @@ def update_site_probs(sequences:  List[List[int]],
     # correct eraser for the current position in the motif. You will need 3 nested
     # loops to do this.
     # calculate the sum of each position in the pfm
+    expected_base_freq_in_motif = sum([
+        # for each sequence 
+        np.einsum(
+            "nwb, n -> wb",
+            onehot_windows[i_seq], posteriors  
+        ) for i_seq in range(n_seq)
+    ])
+    # add by pseudocount
+    unnormalized_site_probs = expected_base_freq_in_motif + motif_pseudocounts[np.newaxis,:]
     normalizer = np.sum(unnormalized_site_probs, axis=1)[:, np.newaxis]
 
     return (unnormalized_site_probs / normalizer) if normalize \
         else unnormalized_site_probs
 
 
-def m_step(sequences: List[List[int]],
+def m_step(sequences: Union[List[List[int]], List[NDArray]],
            motif_length: int,
            posteriors: List[NDArray[np.float64]],
            motif_pseudocounts: List[float],
@@ -238,6 +283,10 @@ def m_step(sequences: List[List[int]],
     :return: A tuple containing the updated motif prior and site probabilities
     :rtype: tuple[list[float], list[list[float]]]
     """
+    onehot_sequences = standardize_sequences(sequences)
+    # def update_motif_prior(posteriors: List[NDArray[np.float64]]) -> float:
+    updated_site_prior = update_motif_prior(posteriors)
+    updated_site_probs = update_site_probs(onehot_sequences,motif_length,posteriors,motif_pseudocounts,erasers)
     # Update the motif prior and site probabilities based on the posteriors.
     return updated_site_prior, updated_site_probs
 
@@ -285,6 +334,10 @@ def siteEM(sequences: List[List[int]],
     erasers = [np.ones(len(seq)) for seq in sequences]
     if not isinstance(init_sequence_model, LikelihoodSequenceModel):
         init_sequence_model = LikelihoodSequenceModel.from_super(init_sequence_model)
+    motif_length = len(init_sequence_model)
+    onehot_sequences = [
+        seq2onehot(seq, 4) for seq in sequences
+    ]
     
     # Perform EM iterations
     for index in range(num_motifs_to_find):
@@ -294,12 +347,17 @@ def siteEM(sequences: List[List[int]],
         while parameter_diff > accuracy and iteration < max_iterations:
             # E-step
             # Note: the E-step is run on each sequence in the input list of
+            posteriors: List[NDArray] = [
+                e_step(seq, current_sequence_model)
+                for seq in onehot_sequences
+            ]
             # sequences
             # M-step. The M-step requires the entire list of sequences.
-
+            updated_site_prior, update_site_probs = m_step(
+                sequences,motif_length,posteriors,motif_pseudocounts,erasers
+            )
             # set the prev_sequence_model to a copy of the parameters which
             # where used in this iteration
-
             prev_sequence_model = current_sequence_model
             # store the updated parameters in a SequenceModel object.
             # the background probs do not change between iterations
@@ -421,17 +479,17 @@ def siteEM_intializer(fasta: Tuple[str, PosixPath],
 
 
 def site_posterior(
-        batched_sequence_window_onehot: NDArray,
+        batched_window_onehot: NDArray,
         sequence_model: LikelihoodSequenceModel) -> NDArray:
     """
     Calculate the posterior probability of a bound site versus an unbound site.
 
-    :param batched_sequence_window_onehot [N,W,b]  
+    :param batched_window_onehot [N,W,b]  
     :return: Posterior probability of a bound site [N]
     """
     # check that the inputs are valid
-    numerator_site = sequence_model.site_prior * sequence_model.likelihood_motif(sequence_onehot, batched=True)
-    numerator_bg = (1-sequence_model.site_prior) * sequence_model.likelihood_background(sequence_onehot, batched=True)
+    numerator_site = sequence_model.site_prior * sequence_model.likelihood_motif(batched_window_onehot, batched=True)
+    numerator_bg = (1-sequence_model.site_prior) * sequence_model.likelihood_background(batched_window_onehot, batched=True)
     if numerator_site == 0 and numerator_bg == 0:
         raise ZeroDivisionError("got likelihood be 0 for both site and background")
     posterior_prob = numerator_site / (numerator_site + numerator_bg)
