@@ -19,7 +19,7 @@ def seq2onehot(sequence:List[int],num_classes:int) -> NDArray:
     return onehot
 
 def standardize_sequences(sequences):
-    if not isinstance(sequences[0], NDArray):
+    if not isinstance(sequences[0], np.ndarray):
         onehot_sequences = [seq2onehot(seq,4) for seq in sequences]
     else:
         onehot_sequences = sequences
@@ -207,7 +207,7 @@ def update_site_probs(sequences: Union[List[List[int]], List[NDArray]],
     """
     # convert sequences to onehot 
     onehot_sequences = standardize_sequences(sequences)
-    n_seq = onehot_sequences.shape[0]
+    n_seq = len(onehot_sequences)
     assert n_seq == len(posteriors), """
     number of sequences should equal to number of posteriors.
     got {} and {}
@@ -217,7 +217,7 @@ def update_site_probs(sequences: Union[List[List[int]], List[NDArray]],
     if erasers:
         onehot_sequences = [
             np.einsum(
-                "lb,b->lb", # set one hot indicator to 0 if position is erased
+                "lb,l->lb", # set one hot indicator to 0 if position is erased
                 onehot_sequences[i_seq], erasers[i_seq]
             ) for i_seq in range(n_seq)
         ]
@@ -242,7 +242,7 @@ def update_site_probs(sequences: Union[List[List[int]], List[NDArray]],
         # for each sequence 
         np.einsum(
             "nwb, n -> wb",
-            onehot_windows[i_seq], posteriors  
+            onehot_windows[i_seq], posteriors[i_seq]
         ) for i_seq in range(n_seq)
     ])
     # add by pseudocount
@@ -347,14 +347,14 @@ def siteEM(sequences: List[List[int]],
         while parameter_diff > accuracy and iteration < max_iterations:
             # E-step
             # Note: the E-step is run on each sequence in the input list of
-            posteriors: List[NDArray] = [
+            normalized_posteriors: List[NDArray] = [
                 e_step(seq, current_sequence_model)
                 for seq in onehot_sequences
             ]
             # sequences
             # M-step. The M-step requires the entire list of sequences.
-            updated_site_prior, update_site_probs = m_step(
-                sequences,motif_length,posteriors,motif_pseudocounts,erasers
+            updated_site_prior, updated_site_probs = m_step(
+                sequences,motif_length,normalized_posteriors,motif_pseudocounts,erasers
             )
             # set the prev_sequence_model to a copy of the parameters which
             # where used in this iteration
@@ -490,7 +490,7 @@ def site_posterior(
     # check that the inputs are valid
     numerator_site = sequence_model.site_prior * sequence_model.likelihood_motif(batched_window_onehot, batched=True)
     numerator_bg = (1-sequence_model.site_prior) * sequence_model.likelihood_background(batched_window_onehot, batched=True)
-    if numerator_site == 0 and numerator_bg == 0:
+    if np.any((numerator_site == 0) * (numerator_bg == 0)):
         raise ZeroDivisionError("got likelihood be 0 for both site and background")
     posterior_prob = numerator_site / (numerator_site + numerator_bg)
     return posterior_prob
